@@ -40,7 +40,7 @@ class LlamaPPlTransformerLayerInfer(LlamaTransformerLayerInfer):
                                                           infer_state.mem_manager.key_scale_buffer[self.layer_num_],
                                                           infer_state.mem_manager.value_buffer[self.layer_num_],
                                                           infer_state.mem_manager.value_scale_buffer[self.layer_num_],
-                                                          infer_state.b_loc,
+                                                          infer_state.b_loc.to(torch.int64),
                                                           infer_state.b_seq_len,
                                                           infer_state.max_len_in_batch)
            

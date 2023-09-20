@@ -11,6 +11,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.mem_manager import MemoryManager
 from lightllm.common.int8kv_mem_manager import INT8KVMemoryManager
 from lightllm.common.basemodel import TpPartBaseModel
+import torch.distributed as dist
 
 
 class LlamaTpPartModel(TpPartBaseModel):
@@ -125,3 +126,14 @@ class LlamaTpPartModel(TpPartBaseModel):
             self._sin_cached[seq_loc_index:seq_loc_index + 1, :] = torch.sin(freqs).to(torch.float16).cuda()
         return
 
+    def get_input_embeddings(self):
+        def func(input_ids):
+            input_mask = torch.logical_or(self.pre_infer.vob_start_id_ > input_ids, input_ids >= self.pre_infer.vob_end_id_)
+            tmp_input_ids = (input_ids - self.pre_infer.vob_start_id_)
+            tmp_input_ids[input_mask] = 0
+            input_embdings = torch.embedding(self.pre_post_weight.wte_weight_, tmp_input_ids, padding_idx=-1)
+            input_embdings[input_mask] = 0.0
+            if self.world_size_ > 1:
+                dist.all_reduce(input_embdings, op=dist.ReduceOp.SUM, async_op=False)
+            return input_embdings
+        return func

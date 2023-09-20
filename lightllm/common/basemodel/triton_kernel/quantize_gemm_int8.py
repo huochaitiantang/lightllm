@@ -52,7 +52,7 @@ def quantize_int8_perrow(fpa):
     a_scale = torch.empty(fpa.shape[0], device=fpa.device, dtype=torch.float16)
     M, K = fpa.shape
     BLOCK_SIZE_M = 1
-    BLOCK_SIZE_K = triton.next_power_of_2(K)
+    BLOCK_SIZE_K = 256
     grid = (M // BLOCK_SIZE_M,)
     quantize_int8_perrow_kernel[grid](
         fpa, a, a_scale,
