@@ -38,10 +38,13 @@ def destindex_copy_kv(K, DestLoc, Out):
     grid = (seq_len,)
     num_warps = 1
 
+    K_s0, K_s1, K_s2 = K.stride()
+    O_s0, O_s1, O_s2 = Out.stride()
+
     _fwd_kernel_destindex_copy_kv[grid](
         K, DestLoc, Out,
-        K.stride(0), K.stride(1), K.stride(2),
-        Out.stride(0), Out.stride(1), Out.stride(2),
+        K_s0, K_s1, K_s2,
+        O_s0, O_s1, O_s2,
         head_num,
         BLOCK_DMODEL=head_dim,
         BLOCK_HEAD=BLOCK_HEAD,

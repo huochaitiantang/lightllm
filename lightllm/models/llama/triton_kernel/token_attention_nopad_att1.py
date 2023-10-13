@@ -62,14 +62,19 @@ def token_att_fwd(q, k, att_out, B_Loc, B_Start_Loc, B_Seqlen, max_input_len):
     grid = (batch, head_num, triton.cdiv(max_input_len, BLOCK))
 
     num_warps = 4
+
+    B_Loc_s0, B_Loc_s1 = B_Loc.stride()
+    q_s0, q_s1, q_s2 = q.stride()
+    k_s0, k_s1, k_s2 = k.stride()
+    o_s0, o_s1 = att_out.stride()
     
     _fwd_kernel_token_att1[grid](
         q, k, sm_scale, B_Loc, B_Start_Loc, B_Seqlen, max_input_len,
         att_out,
-        B_Loc.stride(0), B_Loc.stride(1),
-        q.stride(0), q.stride(1), q.stride(2),
-        k.stride(0), k.stride(1), k.stride(2),
-        att_out.stride(0), att_out.stride(1),
+        B_Loc_s0, B_Loc_s1,
+        q_s0, q_s1, q_s2,
+        k_s0, k_s1, k_s2,
+        o_s0, o_s1,
         BLOCK_DMODEL=Lk,
         BLOCK_N=BLOCK,
         num_warps=num_warps,

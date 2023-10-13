@@ -63,12 +63,16 @@ def token_softmax_reducev_fwd(logics, v, o, b_loc, b_start_loc, b_seq_len, max_i
     batch, head = b_seq_len.shape[0], logics.shape[0]
     grid = (batch, head)
     num_warps = 1
+    l_s0, l_s1 = logics.stride()
+    v_s0, v_s1, v_s2 = v.stride()
+    o_s0, o_s1, o_s2 = o.stride()
+    b_s0, b_s1 = b_loc.stride()
     _fwd_kernel[grid](
         logics, v, o, b_loc, b_start_loc, b_seq_len, max_input_len,
-        logics.stride(0), logics.stride(1),
-        v.stride(0), v.stride(1), v.stride(2),
-        o.stride(0), o.stride(1), o.stride(2),
-        b_loc.stride(0), b_loc.stride(1),
+        l_s0, l_s1,
+        v_s0, v_s1, v_s2,
+        o_s0, o_s1, o_s2,
+        b_s0, b_s1,
         other_kv_index,
         BLOCK_DMODEL=v.shape[-1],
         BLOCK_N=BLOCK,

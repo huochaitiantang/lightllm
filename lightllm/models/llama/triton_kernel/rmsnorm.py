@@ -38,12 +38,11 @@ def _rms_norm_fwd_fused(
         tl.store(Y + cols, y.to(tl.float16), mask=mask)
 
 
-def rmsnorm_forward(x, weight, eps):
+def rmsnorm_forward(x, weight, eps, y=None):
     # allocate output
-    y = torch.empty_like(x)
-    # reshape input data into 2D tensor
-    x_arg = x.view(-1, x.shape[-1])
-    M, N = x_arg.shape
+    if y is None:
+        y = torch.empty_like(x)
+    M, N = x.shape
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
@@ -56,8 +55,8 @@ def rmsnorm_forward(x, weight, eps):
     BLOCK_SIZE = 128 * 2 * 2 * 2 * 2 * 2 * 2 * 2
     num_warps = 8
     # enqueue kernel
-    _rms_norm_fwd_fused[(M,)](x_arg, y, weight,
-                              x_arg.stride(0), N, eps,
+    _rms_norm_fwd_fused[(M,)](x, y, weight,
+                              x.stride(0), N, eps,
                               BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps)
     return y
 

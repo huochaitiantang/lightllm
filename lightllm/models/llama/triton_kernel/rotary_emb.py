@@ -59,11 +59,15 @@ def rotary_emb_fwd(q, cos, sin):
     else:
         num_warps = 4
 
+    q_s0, q_s1, q_s2 = q.stride()
+    cos_s0, cos_s1 = cos.stride()
+    sin_s0, sin_s1 = sin.stride()
+
     _rotary_kernel[grid](
         q, cos, sin,
-        q.stride(0), q.stride(1), q.stride(2),
-        cos.stride(0), cos.stride(1),
-        sin.stride(0), sin.stride(1),
+        q_s0, q_s1, q_s2,
+        cos_s0, cos_s1,
+        sin_s0, sin_s1,
         total_len, head_num,
         BLOCK_HEAD=BLOCK_HEAD,
         BLOCK_SEQ=BLOCK_SEQ,

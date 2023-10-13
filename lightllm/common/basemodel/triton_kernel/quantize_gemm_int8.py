@@ -7,10 +7,18 @@ import triton.language as tl
 
 @triton.autotune(
     configs=[
-        triton.Config({}, num_stages=2, num_warps=8),
-        triton.Config({}, num_stages=2, num_warps=4),
-        triton.Config({}, num_stages=2, num_warps=2),
-        triton.Config({}, num_stages=2, num_warps=1),
+        triton.Config({'BLOCK_SIZE_K': 64}, num_warps=4),
+        triton.Config({'BLOCK_SIZE_K': 256}, num_warps=4),
+        triton.Config({'BLOCK_SIZE_K': 1024}, num_warps=4),
+        triton.Config({'BLOCK_SIZE_K': 4096}, num_warps=4),
+        triton.Config({'BLOCK_SIZE_K': 64}, num_warps=2),
+        triton.Config({'BLOCK_SIZE_K': 256}, num_warps=2),
+        triton.Config({'BLOCK_SIZE_K': 1024}, num_warps=2),
+        triton.Config({'BLOCK_SIZE_K': 4096}, num_warps=2),
+        triton.Config({'BLOCK_SIZE_K': 64}, num_warps=1),
+        triton.Config({'BLOCK_SIZE_K': 256}, num_warps=1),
+        triton.Config({'BLOCK_SIZE_K': 1024}, num_warps=1),
+        triton.Config({'BLOCK_SIZE_K': 4096}, num_warps=1),
      ],
     key=['K'],
 )
@@ -47,22 +55,76 @@ def quantize_int8_perrow_kernel(
     tl.store(as_ptr + as_offs, a_scale)
 
 
-def quantize_int8_perrow(fpa):
-    a = torch.empty(fpa.shape, device=fpa.device, dtype=torch.int8)
-    a_scale = torch.empty(fpa.shape[0], device=fpa.device, dtype=torch.float16)
+def quantize_int8_perrow(fpa, a, a_scale):
     M, K = fpa.shape
     BLOCK_SIZE_M = 1
-    BLOCK_SIZE_K = 256
     grid = (M // BLOCK_SIZE_M,)
     quantize_int8_perrow_kernel[grid](
         fpa, a, a_scale,
         M, K,
-        fpa.stride(0), fpa.stride(1),
-        a.stride(0), a.stride(1),
-        a_scale.stride(0),
-        BLOCK_SIZE_M, BLOCK_SIZE_K,
+        K, 1,
+        K, 1,
+        1,
+        BLOCK_SIZE_M,
     )
     return a, a_scale
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=8),
+        triton.Config({}, num_warps=4),
+        triton.Config({}, num_warps=2),
+        triton.Config({}, num_warps=1),
+     ],
+    key=['M', 'N'],
+)
+@triton.jit
+def silu_mul_kernel(
+    x_ptr, y_ptr, z_ptr,
+    M, N,
+    stride_xm, stride_xn,
+    stride_ym, stride_yn,
+    stride_zm, stride_zn,
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
+):
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
+
+    offs_m = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    offs_n = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+
+    x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_n[None, :] * stride_xn
+    y_ptrs = y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn
+    z_ptrs = z_ptr + offs_m[:, None] * stride_zm + offs_n[None, :] * stride_zn
+
+    x = tl.load(x_ptrs, mask=offs_n[None, :] < N and offs_m[:, None] < M)
+    y = tl.load(y_ptrs, mask=offs_n[None, :] < N and offs_m[:, None] < M)
+
+    # sigmoid(x) * x * y
+    z = tl.sigmoid(x.to(tl.float32)).to(tl.float16) * x * y
+    tl.store(z_ptrs, z)
+
+
+# return silu(x) * y
+def silu_mul(x, y, out):
+    M, N = x.shape
+    assert (M, N) == y.shape, "{} vs {}!".format(x, y)
+    BLOCK_SIZE_M = 1
+    BLOCK_SIZE_N = 256
+    grid = (M // BLOCK_SIZE_M, triton.cdiv(N, BLOCK_SIZE_N))
+    x_stride_0, x_stride_1 = x.stride()
+    y_stride_0, y_stride_1 = y.stride()
+    silu_mul_kernel[grid](
+        x, y, out,
+        M, N,
+        x_stride_0, x_stride_1,
+        y_stride_0, y_stride_1,
+        N, 1,
+        BLOCK_SIZE_M, BLOCK_SIZE_N,
+    )
+    return out
 
 
 @triton.autotune(
@@ -84,23 +146,6 @@ def quantize_int8_perrow(fpa):
 	    triton.Config({'SPLIT_K': 1, 'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64,  'GROUP_SIZE_M': 16}, num_stages=4, num_warps=4),
 	    triton.Config({'SPLIT_K': 1, 'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 16}, num_stages=3, num_warps=8),
 	    triton.Config({'SPLIT_K': 1, 'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 16}, num_stages=2, num_warps=4),
-        triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
-        triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 64,  'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64,  'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 64,  'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32,  'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 64,  'BLOCK_SIZE_N': 32,  'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
-        triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 32,  'BLOCK_SIZE_N': 64,  'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
-        triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32,  'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-		triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64,  'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
-        triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=2, num_warps=4),
-		triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32,  'GROUP_SIZE_M': 16}, num_stages=4, num_warps=4),
-		triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64,  'GROUP_SIZE_M': 16}, num_stages=3, num_warps=8),
-		triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 16}, num_stages=2, num_warps=4),
-		triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64,  'GROUP_SIZE_M': 16}, num_stages=4, num_warps=4),
-		triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 16}, num_stages=3, num_warps=8),
-		triton.Config({'SPLIT_K': 2, 'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 256, 'GROUP_SIZE_M': 16}, num_stages=2, num_warps=4),
     ],
     key=['M', 'N', 'K'],
     reset_to_zero=['c_ptr']
@@ -185,37 +230,39 @@ def matmul_kernel(
     if SPLIT_K == 1:
         tl.store(c_ptrs, c, mask=c_mask)
     else:
+        raise
         tl.atomic_add(c_ptrs, c, mask=c_mask)
 
 
-def matmul_quantize_int8(fpa, b, b_scale, out=None):
-    a, a_scale = quantize_int8_perrow(fpa)
-    # a, a_scale = quantize_int8(fpa, axis=1)
+def matmul_quantize_int8(fpa, b, b_scale, a, a_scale, out):
+    a, a_scale = quantize_int8_perrow(fpa, a, a_scale)
     return matmul_int8(a, a_scale, b, b_scale, out)
 
 
-def matmul_int8(a, a_scale, b, b_scale, out=None):
+def matmul_int8(a, a_scale, b, b_scale, c):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
     M, K = a.shape
     K, N = b.shape
-    # Allocates output.
-    if out == None:
-        c = torch.zeros((M, N), device=a.device, dtype=torch.float16)
-    else:
-        c = out.fill_(0.)
     grid = lambda META: (
         triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
-        META['SPLIT_K'],
+        1,
     )
+
+    b_stride_0, b_stride_1 = b.stride()
     matmul_kernel[grid](
         a, a_scale, b, b_scale, c,
         M, N, K,
-        a.stride(0), a.stride(1),
-        a_scale.stride(0),
-        b.stride(0), b.stride(1),
-        b_scale.stride(0),
-        c.stride(0), c.stride(1),
+        # a.stride(0), a.stride(1),
+        K, 1,
+        # a_scale.stride(0),
+        1,
+        # b.stride(0), b.stride(1),
+        b_stride_0, b_stride_1,
+        # b_scale.stride(0),
+        1,
+        # c.stride(0), c.stride(1),
+        N, 1,
     )
     return c
 
@@ -360,6 +407,24 @@ def test_model_layer(bs, sqe_len, hidden, inter, tp):
     st2 += t2
     st3 += t3
     print("Triton time {} Torch time {} Quant time {}".format(st1, st2, st3))
+
+
+def test_silu_mul(M, N):
+    torch.manual_seed(1234)
+    device = torch.device("cuda:0")
+    x = torch.randn(M, N).to(dtype=torch.float16, device=device)
+    y = torch.randn(M, N).to(dtype=torch.float16, device=device)
+    out_triton = torch.empty_like(x)
+    print("x:", x[:, :10])
+    print("y:", y[:, :10])
+    out_triton = silu_mul(x, y, out_triton)
+    out_torch = torch.nn.functional.silu(x) * y
+    print("triton:", out_triton[:, :10])
+    print("torch:", out_torch[:, :10])
+    diff = (out_triton - out_torch).abs()
+    print("diff max:", diff.max())
+    print("diff argmax:", diff.argmax())
+    print("all close 0.01", torch.allclose(out_torch, out_triton, atol=0.01))
 
 
 if __name__ == "__main__":
