@@ -24,6 +24,12 @@ from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int4 import matmul_
 from lightllm.utils.infer_utils import mark_cost_time
 from lightllm.models.llama.triton_kernel.token_attention_softmax_and_reducev import token_softmax_reducev_fwd
 
+if int(os.getenv('LMDEPLOY_KERNEL', 0)) == 1:
+    from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int4_lmdeploy import matmul_dequantize_int4_lmdeploy as matmul_dequantize_int4_gptq
+    from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int4_lmdeploy import matmul_dequantize_int4_lmdeploy as matmul_dequantize_int4_s1
+    print("apply lmdeploy kernel, matmul_dequantize_int4_gptq:", matmul_dequantize_int4_gptq)
+    print("apply lmdeploy kernel, matmul_dequantize_int4_s1:", matmul_dequantize_int4_s1)
+
 DEVICE = torch.cuda.current_device()
 MAX_BATCH = int(os.getenv('MAX_BATCH', 5))
 MAX_TOKEN = int(os.getenv('MAX_BATCH_TOTAL_TOKENS', 4096))

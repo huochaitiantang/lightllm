@@ -1,5 +1,5 @@
 import math
-
+import os
 import numpy as np
 import torch
 from functools import partial
@@ -7,6 +7,10 @@ from functools import partial
 from lightllm.common.basemodel import TransformerLayerWeight
 from lightllm.common.basemodel.triton_kernel.quantize_gemm_int8 import quantize_int8
 from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int4 import quantize_int4
+
+if int(os.getenv('LMDEPLOY_KERNEL', 0)) == 1:
+    from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int4_lmdeploy import quantize_int4_lmdeploy as quantize_int4
+    print("apply lmdeploy kernel, quantize_int4:", quantize_int4)
 
 
 class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
@@ -66,7 +70,8 @@ class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
             self.qkv_fused_weight, self.qkv_fused_weight_scale, self.qkv_fused_weight_zp = \
                 self.quantize_weight(self.qkv_fused_weight)
             self.qkv_fused_weight = self.qkv_fused_weight.cuda()
-            self.qkv_fused_weight_scale = self.qkv_fused_weight_scale.to(self.data_type_).cuda()
+            self.qkv_fused_weight_scale = self.qkv_fused_weight_scale.to(self.data_type_).cuda() \
+                if self.qkv_fused_weight_scale is not None else None
             self.qkv_fused_weight_zp = self.qkv_fused_weight_zp.cuda() \
                 if self.qkv_fused_weight_zp is not None else None
 
@@ -77,7 +82,7 @@ class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
             self.o_weight_, self.o_weight_scale_, self.o_weight_zp_ = \
                 self.quantize_weight(self.o_weight_.transpose(0, 1))
             self.o_weight_ = self.o_weight_.cuda()
-            self.o_weight_scale_ = self.o_weight_scale_.to(self.data_type_).cuda()
+            self.o_weight_scale_ = self.o_weight_scale_.to(self.data_type_).cuda() if self.o_weight_scale_ is not None else None
             self.o_weight_zp_ = self.o_weight_zp_.cuda() if self.o_weight_zp_ is not None else None
     
     def _load_ffn_weights(self, weights):
@@ -102,7 +107,8 @@ class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
             self.gate_up_fused_weight, self.gate_up_fused_weight_scale, self.gate_up_fused_weight_zp = \
                 self.quantize_weight(self.gate_up_fused_weight)
             self.gate_up_fused_weight = self.gate_up_fused_weight.cuda()
-            self.gate_up_fused_weight_scale = self.gate_up_fused_weight_scale.to(self.data_type_).cuda()
+            self.gate_up_fused_weight_scale = self.gate_up_fused_weight_scale.to(self.data_type_).cuda() \
+                if self.gate_up_fused_weight_scale is not None else None
             self.gate_up_fused_weight_zp = self.gate_up_fused_weight_zp.cuda() \
                 if self.gate_up_fused_weight_zp is not None else None
 
@@ -112,5 +118,5 @@ class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
             self.down_proj, self.down_proj_scale, self.down_proj_zp = \
                 self.quantize_weight(self.down_proj.transpose(0, 1))
             self.down_proj = self.down_proj.cuda()
-            self.down_proj_scale = self.down_proj_scale.to(self.data_type_).cuda()
+            self.down_proj_scale = self.down_proj_scale.to(self.data_type_).cuda() if self.down_proj_scale is not None else None
             self.down_proj_zp = self.down_proj_zp.cuda() if self.down_proj_zp is not None else None
