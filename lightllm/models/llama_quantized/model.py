@@ -1,6 +1,7 @@
 import os
 import json
 from functools import partial
+import os
 
 import torch
 
@@ -8,7 +9,7 @@ from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.models.llama_quantized.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeightQuantized
+from lightllm.models.llama_quantized.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeightQuantized, LlamaTransformerLayerWeightOnlyQuantized
 from lightllm.models.llama_quantized.layer_infer.transformer_layer_infer import \
     LlamaTransformerLayerInferINT8, LlamaTransformerLayerInferINT4
 from lightllm.common.mem_manager import MemoryManager
@@ -43,4 +44,7 @@ class LlamaTpPartModelQuantized(LlamaTpPartModel):
             if _mode in infer_class_dict:
                 self.transformer_layer_infer_class = infer_class_dict[_mode]
                 print("Model using mode", _mode)
-        self.transformer_weight_class = partial(LlamaTransformerLayerWeightQuantized, group_size=self.q_group_size)
+        if int(os.getenv('LOAD_WEIGHT_ONLY', 0)) == 1:
+            self.transformer_weight_class = partial(LlamaTransformerLayerWeightOnlyQuantized, group_size=self.q_group_size)
+        else:
+            self.transformer_weight_class = partial(LlamaTransformerLayerWeightQuantized, group_size=self.q_group_size)

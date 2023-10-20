@@ -120,3 +120,59 @@ class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
             self.down_proj = self.down_proj.cuda()
             self.down_proj_scale = self.down_proj_scale.to(self.data_type_).cuda() if self.down_proj_scale is not None else None
             self.down_proj_zp = self.down_proj_zp.cuda() if self.down_proj_zp is not None else None
+
+
+class LlamaTransformerLayerWeightOnlyQuantized(LlamaTransformerLayerWeightQuantized):
+    def __init__(self, layer_num, tp_rank, world_size, data_type, network_config, mode=[], group_size=128):
+        super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode)
+
+    def _load_qkvo_weights(self, weights):
+        # input layernorm params
+        if f"model.layers.{self.layer_num_}.input_layernorm.weight" in weights:
+            self.att_norm_weight_ = self._cuda(weights[f"model.layers.{self.layer_num_}.input_layernorm.weight"])
+
+        # q k v weights for llama
+        if f'model.layers.{self.layer_num_}.self_attn.qkv_proj.weight' in weights:
+            self.qkv_fused_weight = weights[f'model.layers.{self.layer_num_}.self_attn.qkv_proj.weight']
+            self.qkv_fused_weight_scale = weights.get(f'model.layers.{self.layer_num_}.self_attn.qkv_proj.weight.scale', None)
+            self.qkv_fused_weight_zp = weights.get(f'model.layers.{self.layer_num_}.self_attn.qkv_proj.weight.zp', None)
+
+            self.qkv_fused_weight = self.qkv_fused_weight.cuda()
+            self.qkv_fused_weight_scale = self.qkv_fused_weight_scale.to(self.data_type_).cuda() \
+                if self.qkv_fused_weight_scale is not None else None
+            self.qkv_fused_weight_zp = self.qkv_fused_weight_zp.cuda() \
+                if self.qkv_fused_weight_zp is not None else None
+
+        # attention output dense params
+        if f"model.layers.{self.layer_num_}.self_attn.o_proj.weight" in weights:
+            self.o_weight_ = weights[f"model.layers.{self.layer_num_}.self_attn.o_proj.weight"]
+            self.o_weight_scale_ = weights.get(f'model.layers.{self.layer_num_}.self_attn.o_proj.weight.scale', None)
+            self.o_weight_zp_ = weights.get(f'model.layers.{self.layer_num_}.self_attn.o_proj.weight.zp', None)
+
+            self.o_weight_ = self.o_weight_.cuda()
+            self.o_weight_scale_ = self.o_weight_scale_.to(self.data_type_).cuda() if self.o_weight_scale_ is not None else None
+            self.o_weight_zp_ = self.o_weight_zp_.cuda() if self.o_weight_zp_ is not None else None
+
+    def _load_ffn_weights(self, weights):
+        if f"model.layers.{self.layer_num_}.post_attention_layernorm.weight" in weights:
+            self.ffn_norm_weight_ = self._cuda(weights[f"model.layers.{self.layer_num_}.post_attention_layernorm.weight"])
+
+        if f"model.layers.{self.layer_num_}.mlp.gateup_proj.weight" in weights:
+            self.gate_up_fused_weight = weights[f"model.layers.{self.layer_num_}.mlp.gateup_proj.weight"]
+            self.gate_up_fused_weight_scale = weights.get(f'model.layers.{self.layer_num_}.mlp.gateup_proj.weight.scale', None)
+            self.gate_up_fused_weight_zp = weights.get(f'model.layers.{self.layer_num_}.mlp.gateup_proj.weight.zp', None)
+
+            self.gate_up_fused_weight = self.gate_up_fused_weight.cuda()
+            self.gate_up_fused_weight_scale = self.gate_up_fused_weight_scale.to(self.data_type_).cuda() \
+                if self.gate_up_fused_weight_scale is not None else None
+            self.gate_up_fused_weight_zp = self.gate_up_fused_weight_zp.cuda() \
+                if self.gate_up_fused_weight_zp is not None else None
+
+        if f"model.layers.{self.layer_num_}.mlp.down_proj.weight" in weights:
+            self.down_proj = weights[f"model.layers.{self.layer_num_}.mlp.down_proj.weight"]
+            self.down_proj_scale = weights.get(f"model.layers.{self.layer_num_}.mlp.down_proj.weight.scale", None)
+            self.down_proj_zp = weights.get(f"model.layers.{self.layer_num_}.mlp.down_proj.weight.zp", None)
+
+            self.down_proj = self.down_proj.cuda()
+            self.down_proj_scale = self.down_proj_scale.to(self.data_type_).cuda() if self.down_proj_scale is not None else None
+            self.down_proj_zp = self.down_proj_zp.cuda() if self.down_proj_zp is not None else None
