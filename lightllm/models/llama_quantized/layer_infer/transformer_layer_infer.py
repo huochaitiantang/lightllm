@@ -465,70 +465,145 @@ class LlamaTransformerLayerInferINT4LMDeploy(LlamaTransformerLayerInfer):
         super().__init__(layer_num, tp_rank, world_size, network_config, mode)
         self.inter_dim_ = network_config['intermediate_size']
         self.q_group_size = group_size
+        assert self.tp_q_head_num_ == self.tp_k_head_num_
+        assert self.tp_q_head_num_ == self.tp_v_head_num_
 
-    def _get_qkv(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeightQuantized, matmul_int4_func) -> torch.Tensor:
-        qkv_output = matmul_int4_func(input.view(-1, self.embed_dim_),
-                                      layer_weight.qkv_fused_weight,
-                                      layer_weight.qkv_fused_weight_scale,
-                                      layer_weight.qkv_fused_weight_zp,
-                                      self.q_group_size)
-        tp_hidden_dim = self.embed_dim_ // self.world_size_
-        q = qkv_output[:, : tp_hidden_dim]
-        k = qkv_output[:, tp_hidden_dim : tp_hidden_dim * 2]
-        v = qkv_output[:, tp_hidden_dim * 2 :]
-        rotary_emb_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_), infer_state.position_cos, infer_state.position_sin)
-        cache_k_ = k.view(-1, self.tp_k_head_num_, self.head_dim_)
+    def _get_qkv(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeightQuantized, matmul_int4_func, qkv_output) -> torch.Tensor:
+        qkv_output = matmul_int4_func(
+            input,
+            layer_weight.qkv_fused_weight,
+            layer_weight.qkv_fused_weight_scale,
+            layer_weight.qkv_fused_weight_zp,
+            self.q_group_size,
+            qkv_output,
+        )
+        tmp_qkv = qkv_output.view(-1, 3, self.tp_q_head_num_, self.head_dim_)
+        q = tmp_qkv[:, 0, :, :]
+        cache_k_ = tmp_qkv[:, 1, :, :]
+        cache_v_ = tmp_qkv[:, 2, :, :]
+
+        rotary_emb_fwd(q, infer_state.position_cos, infer_state.position_sin)
         rotary_emb_fwd(cache_k_, infer_state.position_cos, infer_state.position_sin)
-        cache_v_ = v.view(-1, self.tp_v_head_num_, self.head_dim_)
         return q, cache_k_, cache_v_
 
     def _get_qkv_context(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeightQuantized) -> torch.Tensor:
-        return self._get_qkv(input, infer_state, layer_weight, matmul_dequantize_int4_lmdeploy)
+        M, K = input.shape
+        assert K == self.embed_dim_
+        N = layer_weight.qkv_fused_weight_zp.shape[1]
+        qkv_output = torch.empty((M, N), device=input.device, dtype=torch.float16)
+        return self._get_qkv(input, infer_state, layer_weight, matmul_dequantize_int4_lmdeploy, qkv_output)
 
     def _get_qkv_decode(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeightQuantized) -> torch.Tensor:
-        return self._get_qkv(input, infer_state, layer_weight, matmul_dequantize_int4_lmdeploy)
+        M, K = input.shape
+        assert K == self.embed_dim_
+        N = layer_weight.qkv_fused_weight_zp.shape[1]
+        qkv_output = getT((M, N), "fp16", MATMUL_O)
+        return self._get_qkv(input, infer_state, layer_weight, matmul_dequantize_int4_lmdeploy, qkv_output)
 
     def _get_o_context(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeightQuantized) -> torch.Tensor:
-        o_tensor = matmul_dequantize_int4_lmdeploy(input.view(-1, self.tp_o_head_num_ * self.head_dim_),
-                                             layer_weight.o_weight_,
-                                             layer_weight.o_weight_scale_,
-                                             layer_weight.o_weight_zp_,
-                                             self.q_group_size)
+        new_input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
+        M, K = new_input.shape
+        N = layer_weight.o_weight_zp_.shape[1]
+        o_tensor = matmul_dequantize_int4_lmdeploy(
+            new_input,
+            layer_weight.o_weight_,
+            layer_weight.o_weight_scale_,
+            layer_weight.o_weight_zp_,
+            self.q_group_size,
+            torch.empty((M, N), device=input.device, dtype=torch.float16)
+        )
         return o_tensor
 
     def _get_o_decode(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeightQuantized) -> torch.Tensor:
-        o_tensor = matmul_dequantize_int4_lmdeploy(input.view(-1, self.tp_o_head_num_ * self.head_dim_),
-                                             layer_weight.o_weight_,
-                                             layer_weight.o_weight_scale_,
-                                             layer_weight.o_weight_zp_,
-                                             self.q_group_size)
+        new_input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
+        M, K = new_input.shape
+        N = layer_weight.o_weight_zp_.shape[1]
+
+        o_tensor = matmul_dequantize_int4_lmdeploy(
+            new_input,
+            layer_weight.o_weight_,
+            layer_weight.o_weight_scale_,
+            layer_weight.o_weight_zp_,
+            self.q_group_size,
+            getT((M, N), "fp16", MATMUL_O)
+        )
         return o_tensor
 
-    def _ffn(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeightQuantized, matmul_int4_func) -> torch.Tensor:
-        gate_up_output = matmul_int4_func(input.view(-1, self.embed_dim_),
-                                          layer_weight.gate_up_fused_weight,
-                                          layer_weight.gate_up_fused_weight_scale,
-                                          layer_weight.gate_up_fused_weight_zp,
-                                          self.q_group_size)
+    def _att_norm(self, input, infer_state:LlamaInferStateInfo, layer_weight:LlamaTransformerLayerWeight, output=None)->torch.Tensor:
+        return rmsnorm_forward(input, weight=layer_weight.att_norm_weight_, eps=self.eps_, y=output)
+
+    def _ffn_norm(self, input, infer_state:LlamaInferStateInfo, layer_weight:LlamaTransformerLayerWeight, output=None)->torch.Tensor:
+        return rmsnorm_forward(input, weight=layer_weight.ffn_norm_weight_, eps=self.eps_, y=output)
+
+    def _ffn_context(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeightQuantized) -> torch.Tensor:
+        M, K = input.shape
+        assert K == self.embed_dim_
+        N1 = layer_weight.gate_up_fused_weight_zp.shape[1]
+        N2 = layer_weight.down_proj_zp.shape[1]
+        device = input.device
+        gate_up_output = matmul_dequantize_int4_lmdeploy(
+            input,
+            layer_weight.gate_up_fused_weight,
+            layer_weight.gate_up_fused_weight_scale,
+            layer_weight.gate_up_fused_weight_zp,
+            self.q_group_size,
+            torch.empty((M, N1), device=device, dtype=torch.float16)
+        )
         input = None
         tp_inter_dim = self.inter_dim_ // self.world_size_
         gate_up_output = gate_up_output.view(-1, 2, tp_inter_dim)
-        torch.nn.functional.silu(gate_up_output[:, 0], inplace=True)
-        ffn1_out = gate_up_output[:, 0] * gate_up_output[:, 1]
-        gate_up_output = None
-        ffn2_out = matmul_int4_func(ffn1_out,
-                                    layer_weight.down_proj,
-                                    layer_weight.down_proj_scale,
-                                    layer_weight.down_proj_zp,
-                                    self.q_group_size)
-        ffn1_out = None
+        B = gate_up_output.shape[0]
+
+        ffn1_out = silu_mul(
+            gate_up_output[:, 0],
+            gate_up_output[:, 1],
+            torch.empty((B, tp_inter_dim), device=device, dtype=torch.float16)
+        )
+
+        ffn2_out = matmul_dequantize_int4_lmdeploy(
+            ffn1_out,
+            layer_weight.down_proj,
+            layer_weight.down_proj_scale,
+            layer_weight.down_proj_zp,
+            self.q_group_size,
+            torch.empty((B, N2), device=device, dtype=torch.float16)
+        )
         return ffn2_out
 
-    def _ffn_context(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeightQuantized) -> torch.Tensor:
-        return self._ffn(input, infer_state, layer_weight, matmul_dequantize_int4_lmdeploy)
-
     def _ffn_decode(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeightQuantized) -> torch.Tensor:
-        return self._ffn(input, infer_state, layer_weight, matmul_dequantize_int4_lmdeploy)
+        M, K = input.shape
+        assert K == self.embed_dim_
+        N1 = layer_weight.gate_up_fused_weight_zp.shape[1]
+        N2 = layer_weight.down_proj_zp.shape[1]
+
+        gate_up_output = matmul_dequantize_int4_lmdeploy(
+            input,
+            layer_weight.gate_up_fused_weight,
+            layer_weight.gate_up_fused_weight_scale,
+            layer_weight.gate_up_fused_weight_zp,
+            self.q_group_size,
+            getT((M, N1), "fp16", MATMUL_O),
+        )
+        input = None
+        tp_inter_dim = self.inter_dim_ // self.world_size_
+        gate_up_output = gate_up_output.view(-1, 2, tp_inter_dim)
+        B = gate_up_output.shape[0]
+
+        ffn1_out = silu_mul(
+            gate_up_output[:, 0],
+            gate_up_output[:, 1],
+            getT((B, tp_inter_dim), "fp16", SILUMUL_O),
+        )
+
+        ffn2_out = matmul_dequantize_int4_lmdeploy(
+            ffn1_out,
+            layer_weight.down_proj,
+            layer_weight.down_proj_scale,
+            layer_weight.down_proj_zp,
+            self.q_group_size,
+            getT((B, N2), "fp16", MATMUL_O),
+        )
+        return ffn2_out
 
     @mark_cost_time("trans context flash forward time cost")  # dont to remove this, will make performence down, did not know why
     def _context_attention(self, input_embding, infer_state: LlamaInferStateInfo, layer_weight):
@@ -544,8 +619,19 @@ class LlamaTransformerLayerInferINT4LMDeploy(LlamaTransformerLayerInfer):
             dist.all_reduce(o, op=dist.ReduceOp.SUM, async_op=False)
         input_embding.add_(o.view(-1, self.embed_dim_))
 
+    @mark_cost_time("trans context ffn forward time cost")  # dont to remove this, will make performence down, did not know why
+    def _context_ffn(self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight):
+        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
+        ffn_out = self._ffn_context(input1, infer_state, layer_weight)
+        input1 = None
+        if self.world_size_ > 1:
+            dist.all_reduce(ffn_out, op=dist.ReduceOp.SUM, async_op=False)
+        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
+
     def _token_attention(self, input_embding, infer_state: LlamaInferStateInfo, layer_weight):
-        input1 = self._att_norm(input_embding, infer_state, layer_weight)
+        B, E = input_embding.shape
+        norm_o = getT((B, E), "fp16", NORM_O)
+        input1 = self._att_norm(input_embding, infer_state, layer_weight, norm_o)
         self._pre_cache_kv(infer_state, layer_weight)
         q, cache_k, cache_v = self._get_qkv_decode(input1, infer_state, layer_weight)
         input1 = None
@@ -557,17 +643,10 @@ class LlamaTransformerLayerInferINT4LMDeploy(LlamaTransformerLayerInfer):
             dist.all_reduce(o, op=dist.ReduceOp.SUM, async_op=False)
         input_embding.add_(o.view(-1, self.embed_dim_))
 
-    @mark_cost_time("trans context ffn forward time cost")  # dont to remove this, will make performence down, did not know why
-    def _context_ffn(self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight):
-        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
-        ffn_out = self._ffn_context(input1, infer_state, layer_weight)
-        input1 = None
-        if self.world_size_ > 1:
-            dist.all_reduce(ffn_out, op=dist.ReduceOp.SUM, async_op=False)
-        input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
-
     def _token_ffn(self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight):
-        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight)
+        B, E = input_embdings.shape
+        norm_o = getT((B, E), "fp16", NORM_O)
+        input1 = self._ffn_norm(input_embdings, infer_state, layer_weight, norm_o)
         ffn_out = self._ffn_decode(input1, infer_state, layer_weight)
         input1 = None
         if self.world_size_ > 1:
@@ -601,10 +680,8 @@ class LlamaTransformerLayerInferINT4LMDeploy(LlamaTransformerLayerInfer):
         '''
         total_token_num = infer_state.total_token_num
         batch_size = infer_state.batch_size
-        calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
-        att_m_tensor = torch.empty((self.tp_q_head_num_, total_token_num), dtype=q.dtype, device="cuda")
-
-        token_att_fwd(q.view(calcu_shape1),
+        att_m_tensor = getT((self.tp_q_head_num_, total_token_num), "fp16", ATTN_M)
+        token_att_fwd(q,
                       infer_state.mem_manager.key_buffer[self.layer_num_],
                       att_m_tensor,
                       infer_state.b_loc,
@@ -612,18 +689,16 @@ class LlamaTransformerLayerInferINT4LMDeploy(LlamaTransformerLayerInfer):
                       infer_state.b_seq_len,
                       infer_state.max_len_in_batch)
 
-        prob = torch.empty_like(att_m_tensor)
-        token_softmax_fwd(att_m_tensor, infer_state.b_start_loc, infer_state.b_seq_len, prob, infer_state.max_len_in_batch)
-        att_m_tensor = None
-
-        o_tensor = torch.empty_like(q)
-
-        token_att_fwd2(prob,
-                       infer_state.mem_manager.value_buffer[self.layer_num_],
-                       o_tensor.view(calcu_shape1),
-                       infer_state.b_loc,
-                       infer_state.b_start_loc,
-                       infer_state.b_seq_len,
-                       infer_state.max_len_in_batch)
-        prob = None
-        return o_tensor
+        if triton.__version__ >= "2.1.0":
+            o_tensor = getT((batch_size, self.tp_q_head_num_, self.head_dim_), "fp16", ATTN_O)
+            token_softmax_reducev_fwd(att_m_tensor,
+                                      infer_state.mem_manager.value_buffer[self.layer_num_],
+                                      o_tensor,
+                                      infer_state.b_loc,
+                                      infer_state.b_start_loc,
+                                      infer_state.b_seq_len,
+                                      infer_state.max_len_in_batch,
+                                      infer_state.other_kv_index)
+            return o_tensor
+        else:
+            raise Exception("not support triton version")

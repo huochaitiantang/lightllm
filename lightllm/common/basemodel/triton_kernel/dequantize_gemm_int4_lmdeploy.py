@@ -72,7 +72,7 @@ def matmul_dequantize_int4_lmdeploy(
         scales: torch.FloatTensor,
         scale_zeros: torch.IntTensor,
         group_size,
-        output=None
+        output
 ) -> torch.FloatTensor:
     """
     x is activation:             (M, K) float16
@@ -84,10 +84,6 @@ def matmul_dequantize_int4_lmdeploy(
     assert x.shape[1] == qweight.shape[0], "A must be a multiple of 8 in the last dimension"
     M, K = x.shape
     N = qweight.shape[1] * 8
-
-    if output is None:
-        output = torch.empty((M, N), device=x.device, dtype=torch.float16)
-
     int4fp16_matmul(output, qweight, x, scale_zeros, N, M, K, group_size, False)
     return output
 
@@ -109,7 +105,8 @@ def test_correct(M=32, K=2048, N=4096):
     mp(torch_output, "torch_output_fp16")
 
     qweight1, scales1, qzeros1 = quantize_int4_lmdeploy(w, group_size=group_size) # (K, N//8), (K//group_size, N), (K//group_size, N//8)
-    lm_output = matmul_dequantize_int4_lmdeploy(a, qweight1, scales1, qzeros1, group_size)
+    lm_output = torch.empty((M, N), device=a.device, dtype=torch.float16)
+    lm_output = matmul_dequantize_int4_lmdeploy(a, qweight1, scales1, qzeros1, group_size, lm_output)
     mp(lm_output, "lm_output_int4")
     print("Output cos(lmdeploy_int4, torch_fp16):", cmp(lm_output, torch_output))
 
