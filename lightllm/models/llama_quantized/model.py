@@ -11,7 +11,7 @@ from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaP
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama_quantized.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeightQuantized, LlamaTransformerLayerWeightOnlyQuantized
 from lightllm.models.llama_quantized.layer_infer.transformer_layer_infer import \
-    LlamaTransformerLayerInferINT8, LlamaTransformerLayerInferINT4
+    LlamaTransformerLayerInferINT8, LlamaTransformerLayerInferINT4, LlamaTransformerLayerInferINT4LMDeploy
 from lightllm.common.mem_manager import MemoryManager
 from lightllm.common.int8kv_mem_manager import INT8KVMemoryManager
 from lightllm.models.llama.model import LlamaTpPartModel
@@ -38,6 +38,7 @@ class LlamaTpPartModelQuantized(LlamaTpPartModel):
                 self.q_group_size = int(_mode[1:])
         infer_class_dict = {
             'int4weight': partial(LlamaTransformerLayerInferINT4, group_size=self.q_group_size),
+            'int4weight_lmdeploy': partial(LlamaTransformerLayerInferINT4LMDeploy, group_size=self.q_group_size),
             'int8weight': LlamaTransformerLayerInferINT8,
         }
         for _mode in mode:

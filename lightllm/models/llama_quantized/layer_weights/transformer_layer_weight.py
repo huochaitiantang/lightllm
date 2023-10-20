@@ -7,10 +7,7 @@ from functools import partial
 from lightllm.common.basemodel import TransformerLayerWeight
 from lightllm.common.basemodel.triton_kernel.quantize_gemm_int8 import quantize_int8
 from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int4 import quantize_int4
-
-if int(os.getenv('LMDEPLOY_KERNEL', 0)) == 1:
-    from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int4_lmdeploy import quantize_int4_lmdeploy as quantize_int4
-    print("apply lmdeploy kernel, quantize_int4:", quantize_int4)
+from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int4_lmdeploy import quantize_int4_lmdeploy
 
 
 class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
@@ -18,7 +15,8 @@ class LlamaTransformerLayerWeightQuantized(TransformerLayerWeight):
         super().__init__(layer_num, tp_rank, world_size, data_type, network_config, mode)
         quantize_func_dict = {
             'int8weight': quantize_int8,
-            'int4weight': partial(quantize_int4, group_size=group_size)
+            'int4weight': partial(quantize_int4, group_size=group_size),
+            'int4weight_lmdeploy': partial(quantize_int4_lmdeploy, group_size=group_size)
         }
         self.quantize_weight = None
         for item in mode:
