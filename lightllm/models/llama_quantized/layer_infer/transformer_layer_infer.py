@@ -47,11 +47,11 @@ def getT(dims, dtype, init_tensor):
         return T[key]
     dim_cnt = len(dims)
     if dim_cnt == 2:
-        T[key] = init_tensor[:dims[0], :dims[1]].view(*dims)
+        T[key] = init_tensor[:dims[0], :dims[1]].view(*dims).contiguous()
     elif dim_cnt == 3:
-        T[key] = init_tensor[:dims[0], :dims[1], :dims[2]].view(*dims)
+        T[key] = init_tensor[:dims[0], :dims[1], :dims[2]].view(*dims).contiguous()
     elif dim_cnt == 1:
-        T[key] = init_tensor[:dims[0]].view(*dims)
+        T[key] = init_tensor[:dims[0]].view(*dims).contiguous()
     else:
         raise
     return T[key]
