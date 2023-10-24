@@ -24,6 +24,8 @@ from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int4 import matmul_
 from lightllm.utils.infer_utils import mark_cost_time
 from lightllm.models.llama.triton_kernel.token_attention_softmax_and_reducev import token_softmax_reducev_fwd
 from lightllm.common.basemodel.triton_kernel.dequantize_gemm_int4_lmdeploy import matmul_dequantize_int4_lmdeploy
+from lightllm.models.llama.triton_kernel.flash_decoding_stage1 import flash_decode_stage1_outer
+from lightllm.models.llama.triton_kernel.flash_decoding_stage2 import flash_decode_stage2_outer
 
 DEVICE = torch.cuda.current_device()
 MAX_BATCH = int(os.getenv('MAX_BATCH', 5))
@@ -38,6 +40,8 @@ MATMUL_A = torch.empty((MAX_BATCH, 11008), device=DEVICE, dtype=torch.int8)
 MATMUL_AS = torch.empty(MAX_BATCH, device=DEVICE, dtype=torch.float16)
 MATMUL_O = torch.empty((MAX_BATCH, 22016), device=DEVICE, dtype=torch.float16)
 SILUMUL_O = torch.empty((MAX_BATCH, 11008), device=DEVICE, dtype=torch.float16)
+MID_O = torch.empty([MAX_BATCH, 32, 4096, 128], device=DEVICE, dtype=torch.float32)
+MID_OL = torch.empty([MAX_BATCH, 32, 4096], device=DEVICE, dtype=torch.float32)
 
 
 def getT(dims, dtype, init_tensor):
@@ -52,6 +56,8 @@ def getT(dims, dtype, init_tensor):
         T[key] = init_tensor[:dims[0], :dims[1], :dims[2]].view(*dims).contiguous()
     elif dim_cnt == 1:
         T[key] = init_tensor[:dims[0]].view(*dims).contiguous()
+    elif dim_cnt == 4:
+        T[key] = init_tensor[:dims[0], :dims[1], :dims[2], :dims[3]].view(*dims).contiguous()
     else:
         raise
     return T[key]
@@ -256,6 +262,32 @@ class LlamaTransformerLayerInferINT8(LlamaTransformerLayerInfer):
         else:
             self._copy_kv_to_mem_cache(cache_k, cache_v, infer_state.decode_mem_index, mem_manager)
 
+    """
+    def _token_decode_attention_normal(self, q, infer_state: LlamaInferStateInfo):
+        total_token_num = infer_state.total_token_num
+        batch_size = infer_state.batch_size
+        calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
+
+        o_tensor = getT((batch_size, self.tp_q_head_num_, self.head_dim_), "fp16", ATTN_O)
+        mid_o = getT((batch_size, self.tp_q_head_num_, 4096, self.head_dim_), "fp32", MID_O)
+        mid_o_logexpsum = getT((batch_size, self.tp_q_head_num_, 4096), "fp32", MID_OL)
+
+        flash_decode_stage1_outer(
+            q,
+            infer_state.mem_manager.key_buffer[self.layer_num_],
+            infer_state.mem_manager.value_buffer[self.layer_num_],
+            infer_state.b_loc,
+            infer_state.b_seq_len,
+            infer_state.max_len_in_batch,
+            mid_o,
+            mid_o_logexpsum
+        )
+        flash_decode_stage2_outer(
+            mid_o, mid_o_logexpsum, infer_state.b_seq_len, o_tensor
+        )
+        return o_tensor
+
+    """
     def _token_decode_attention_normal(self, q, infer_state: LlamaInferStateInfo):
         total_token_num = infer_state.total_token_num
         batch_size = infer_state.batch_size
@@ -672,6 +704,32 @@ class LlamaTransformerLayerInferINT4LMDeploy(LlamaTransformerLayerInfer):
         else:
             self._copy_kv_to_mem_cache(cache_k, cache_v, infer_state.decode_mem_index, mem_manager)
 
+    """
+    def _token_decode_attention_normal(self, q, infer_state: LlamaInferStateInfo):
+        total_token_num = infer_state.total_token_num
+        batch_size = infer_state.batch_size
+        calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
+
+        o_tensor = getT((batch_size, self.tp_q_head_num_, self.head_dim_), "fp16", ATTN_O)
+        mid_o = getT((batch_size, self.tp_q_head_num_, 4096, self.head_dim_), "fp32", MID_O)
+        mid_o_logexpsum = getT((batch_size, self.tp_q_head_num_, 4096), "fp32", MID_OL)
+
+        flash_decode_stage1_outer(
+            q,
+            infer_state.mem_manager.key_buffer[self.layer_num_],
+            infer_state.mem_manager.value_buffer[self.layer_num_],
+            infer_state.b_loc,
+            infer_state.b_seq_len,
+            infer_state.max_len_in_batch,
+            mid_o,
+            mid_o_logexpsum
+        )
+        flash_decode_stage2_outer(
+            mid_o, mid_o_logexpsum, infer_state.b_seq_len, o_tensor
+        )
+        return o_tensor
+
+    """
 
     def _token_decode_attention_normal(self, q, infer_state: LlamaInferStateInfo):
         '''
