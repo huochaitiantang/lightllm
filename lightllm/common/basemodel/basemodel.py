@@ -136,14 +136,15 @@ class TpPartBaseModel:
             b_req_idx : torch.Tensor,
             b_start_loc : torch.Tensor,
             b_seq_len : torch.Tensor,
-            is_prefill=True):
+            is_prefill=True,
+            inputs_embeds=None):
         if is_prefill:
-            return self._prefill(batch_size, total_token_num, max_len_in_batch, input_ids, b_req_idx, b_start_loc, b_seq_len)
+            return self._prefill(batch_size, total_token_num, max_len_in_batch, input_ids, b_req_idx, b_start_loc, b_seq_len, inputs_embeds)
         else:
             return self._decode(batch_size, total_token_num, max_len_in_batch, input_ids, b_req_idx, b_start_loc, b_seq_len)
 
     
-    def _prefill(self, batch_size, total_token_num, max_len_in_batch, input_ids, b_req_idx, b_start_loc, b_seq_len):
+    def _prefill(self, batch_size, total_token_num, max_len_in_batch, input_ids, b_req_idx, b_start_loc, b_seq_len, inputs_embeds):
         infer_state = self.infer_state_class()
         infer_state.is_prefill = True
         infer_state.batch_size = batch_size
@@ -166,7 +167,7 @@ class TpPartBaseModel:
         infer_state.init_some_extra_state(self, batch_size, total_token_num, max_len_in_batch, 
                                           input_ids, self.req_manager.req_to_token_indexs, b_req_idx,
                                           b_start_loc, b_seq_len, True)
-        predict_logics = self._context_forward(input_ids, infer_state)
+        predict_logics = self._context_forward(input_ids, inputs_embeds, infer_state)
         return predict_logics
     
     def _decode(self, batch_size, total_token_num, max_len_in_batch, input_ids, b_req_idx, b_start_loc, b_seq_len):
@@ -204,9 +205,12 @@ class TpPartBaseModel:
         return predict_logics
     
     @final
-    def _context_forward(self, input_ids, infer_state: InferStateInfo):
+    def _context_forward(self, input_ids, inputs_embeds, infer_state: InferStateInfo):
         cuda_input_ids = input_ids
-        input_embs = self.pre_infer.context_forward(cuda_input_ids, infer_state, self.pre_post_weight)
+        if inputs_embeds is not None:
+            input_embs = inputs_embeds
+        else:
+            input_embs = self.pre_infer.context_forward(cuda_input_ids, infer_state, self.pre_post_weight)
         for i in range(self.layers_num):
             input_embs = self.layers_infer[i].context_forward(input_embs, infer_state, self.trans_layers_weight[i])
         predict_logics = self.post_infer.token_forward(input_embs, infer_state, self.pre_post_weight, return_logics=True)
